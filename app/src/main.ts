@@ -46,7 +46,7 @@ import {
   fetchHistory,
   marketRow,
   postRow,
-  marketDetail,
+  marketDetailLines,
   postDetail,
   marketBrief,
   postBrief,
@@ -56,10 +56,15 @@ import {
   trendStrip,
   morningBrief,
   clampItem,
+  biggestMover,
+  moverLabel,
+  paperLine,
+  PAPER_STAKE,
   type Market,
   type Post,
   type Spot,
   type HistoryPoint,
+  type PaperPos,
 } from './feeds'
 
 // ---------------------------------------------------------------- state
@@ -115,6 +120,32 @@ function savePrices() {
 }
 const alerts = new Map<string, number>()
 const ALERT_THRESHOLD_PTS = 3
+
+// Paper positions — persisted paper trades on live odds (Day 5). One open
+// position per market, fixed $100 paper stake, marked to market from the
+// live feed on every render. Paper only: no wallet, no keys, no funds.
+const PAPER_KEY = 'glance:paper:v1'
+const paper = new Map<string, PaperPos>( (() => {
+  const out = new Map<string, PaperPos>()
+  try {
+    const v = JSON.parse(localStorage.getItem(PAPER_KEY) ?? '{}') as Record<string, unknown>
+    for (const [slug, raw] of Object.entries(v)) {
+      const p = raw as Partial<PaperPos> | null
+      if (
+        p && (p.side === 'yes' || p.side === 'no') &&
+        typeof p.entry === 'number' && typeof p.stake === 'number'
+      ) {
+        out.set(slug, { side: p.side, entry: p.entry, stake: p.stake })
+      }
+    }
+  } catch { /* corrupted storage — start empty */ }
+  return out
+})() )
+function savePaper() {
+  try {
+    localStorage.setItem(PAPER_KEY, JSON.stringify(Object.fromEntries(paper)))
+  } catch { /* storage unavailable */ }
+}
 
 /** The largest current watch alert, if any. */
 function topAlert(): { slug: string; delta: number } | null {
@@ -295,6 +326,15 @@ function homeRows(): HomeRow[] {
   } else {
     rows.push({ label: 'No markets — tap to retry', go: () => { void refresh(true) } })
   }
+  // Biggest 24h mover among everything fetched — "what moved most while
+  // I wasn't looking". Skipped when it is the top row itself.
+  const mover = biggestMover(state.markets)
+  if (mover && mover.slug !== top?.slug && Math.abs(mover.oneDayPriceChange ?? 0) >= 0.01) {
+    const idx = orderedMarkets().findIndex((m) => m.slug === mover.slug)
+    if (idx >= 0) {
+      rows.push({ label: moverLabel(mover), go: () => openMarket(idx, 'home') })
+    }
+  }
   const latest = state.posts[0]
   if (latest) {
     rows.push({ label: postRow(latest), go: () => openPost(0, 'home') })
@@ -317,7 +357,7 @@ function homeRows(): HomeRow[] {
 function footerContent(): string {
   if (!state.loaded) return 'Feeds offline — start the Glance proxy, then tap a row to retry.'
   if (state.view === 'home') {
-    return `${watch.size} watching · spot · top market · the wire — one tap each`
+    return `${watch.size} watching · ${paper.size} paper open · spot · top market · the wire`
   }
   if (state.feed === 'markets') {
     return `${watch.size} watching · tap a row for detail · double-tap: home`
@@ -329,11 +369,13 @@ function detailBody(): string {
   if (state.feed === 'markets') {
     const m = currentMarket()
     if (!m) return 'This market has closed. Back to the list for live ones.'
-    const lines = [marketDetail(m)]
-    const delta = alerts.get(m.slug)
-    if (delta !== undefined) {
-      lines.push(`Watch alert: ${delta >= 0 ? '▲' : '▼'} ${deltaStr(delta)} pts since last check`)
-    }
+    // Line order is a visibility budget: the body box shows ~6 lines, so
+    // the trend strip and the paper line outrank the Event line — for
+    // headline markets the event title is a vaguer copy of the question
+    // ("…above ___ one day after launch?" vs "…above $1B…?"), so it is
+    // popped and not re-appended.
+    const lines = marketDetailLines(m)
+    if (m.eventTitle && m.eventTitle !== m.question) lines.pop()
     if (state.historySlug === m.slug && state.history && state.history.length >= 2) {
       const strip = trendStrip(state.history)
       if (strip) lines.push(strip)
@@ -341,6 +383,12 @@ function detailBody(): string {
       lines.push('24h: unavailable')
     } else if (m.yesTokenId) {
       lines.push('24h: loading…')
+    }
+    const pos = paper.get(m.slug)
+    if (pos) lines.push(paperLine(pos, m))
+    const delta = alerts.get(m.slug)
+    if (delta !== undefined) {
+      lines.push(`Watch alert: ${delta >= 0 ? '▲' : '▼'} ${deltaStr(delta)} pts since last check`)
     }
     return lines.join('\n')
   }
@@ -371,18 +419,44 @@ function ensureHistory() {
     })
 }
 
-function detailActions(): string[] {
-  const back = state.detailFrom === 'home' ? '← Back to home' : '← Back to list'
-  if (state.feed === 'markets') {
-    const m = currentMarket()
-    const w = m && watch.has(m.slug)
-    return [
-      w ? '★ Watching — tap to unwatch' : '☆ Watch this market',
-      'Brief — one-line summary',
-      back,
-    ]
+type DetailAct = 'watch' | 'paperYes' | 'paperNo' | 'paperClose' | 'brief' | 'back'
+
+/** Detail actions as descriptors (label + act together, like homeRows)
+ *  so rendering and click handling can never disagree about indices. */
+function detailActionRows(): { label: string; act: DetailAct }[] {
+  const back: { label: string; act: DetailAct } = {
+    label: state.detailFrom === 'home' ? '← Back to home' : '← Back to list',
+    act: 'back',
   }
-  return ['Brief — one-line summary', back]
+  if (state.feed !== 'markets') {
+    return [{ label: 'Brief — one-line summary', act: 'brief' }, back]
+  }
+  const m = currentMarket()
+  if (!m) return [back]
+  const rows: { label: string; act: DetailAct }[] = [
+    {
+      label: watch.has(m.slug) ? '★ Watching — tap to unwatch' : '☆ Watch this market',
+      act: 'watch',
+    },
+  ]
+  const pos = paper.get(m.slug)
+  if (pos) {
+    rows.push({
+      label: `Paper: close ${pos.side.toUpperCase()} — settle at live price`,
+      act: 'paperClose',
+    })
+  } else {
+    const yes = Number(m.prices?.[0])
+    const no = Number(m.prices?.[1])
+    if (Number.isFinite(yes) && yes > 0.001 && yes < 0.999) {
+      rows.push({ label: `Paper: buy YES $${PAPER_STAKE} @ ${Math.round(yes * 100)}%`, act: 'paperYes' })
+    }
+    if (Number.isFinite(no) && no > 0.001 && no < 0.999) {
+      rows.push({ label: `Paper: buy NO $${PAPER_STAKE} @ ${Math.round(no * 100)}%`, act: 'paperNo' })
+    }
+  }
+  rows.push({ label: 'Brief — one-line summary', act: 'brief' }, back)
+  return rows
 }
 
 function briefBody(): string {
@@ -413,9 +487,12 @@ async function render() {
       listObject: [list(2, 40, 168, listItems())],
     }
   } else if (state.view === 'detail') {
+    // Day 5: the action list grew (paper open/close), so the detail view
+    // trades a little body height for action height — 160/88 vs 168/80,
+    // sized so six body lines (through the paper line) stay visible.
     containers = {
-      textObject: [header, text(3, 'body', 40, 168, detailBody())],
-      listObject: [list(2, 208, 80, detailActions())],
+      textObject: [header, text(3, 'body', 40, 160, detailBody())],
+      listObject: [list(2, 200, 88, detailActionRows().map((r) => r.label))],
     }
   } else if (state.view === 'morning') {
     containers = {
@@ -478,29 +555,40 @@ function onListClick(idx: number) {
     return
   }
   if (state.view === 'detail') {
-    if (state.feed === 'markets') {
-      if (idx === 0) {
-        const m = currentMarket()
-        if (m) {
-          if (watch.has(m.slug)) {
-            watch.delete(m.slug)
-            lastPrices.delete(m.slug)
-            alerts.delete(m.slug)
-            savePrices()
-          } else {
-            watch.add(m.slug)
-            // Baseline = the price on screen now; alerts measure from here.
-            const now = Number(m.prices?.[0])
-            if (Number.isFinite(now)) { lastPrices.set(m.slug, now); savePrices() }
-          }
-          saveWatch()
-        }
-        void render()
-      } else if (idx === 1) { state.view = 'brief'; void render() }
-      else { state.view = state.detailFrom; void render() }
-    } else {
-      if (idx === 0) { state.view = 'brief'; void render() }
-      else { state.view = state.detailFrom; void render() }
+    const act = detailActionRows()[idx]?.act
+    const m = state.feed === 'markets' ? currentMarket() : undefined
+    if (act === 'watch' && m) {
+      if (watch.has(m.slug)) {
+        watch.delete(m.slug)
+        lastPrices.delete(m.slug)
+        alerts.delete(m.slug)
+        savePrices()
+      } else {
+        watch.add(m.slug)
+        // Baseline = the price on screen now; alerts measure from here.
+        const now = Number(m.prices?.[0])
+        if (Number.isFinite(now)) { lastPrices.set(m.slug, now); savePrices() }
+      }
+      saveWatch()
+      void render()
+    } else if ((act === 'paperYes' || act === 'paperNo') && m) {
+      const side = act === 'paperYes' ? 'yes' : 'no'
+      const entry = Number(m.prices?.[side === 'yes' ? 0 : 1])
+      if (Number.isFinite(entry) && entry > 0.001 && entry < 0.999) {
+        paper.set(m.slug, { side, entry, stake: PAPER_STAKE })
+        savePaper()
+      }
+      void render()
+    } else if (act === 'paperClose' && m) {
+      paper.delete(m.slug)
+      savePaper()
+      void render()
+    } else if (act === 'brief') {
+      state.view = 'brief'
+      void render()
+    } else if (act === 'back') {
+      state.view = state.detailFrom
+      void render()
     }
     return
   }

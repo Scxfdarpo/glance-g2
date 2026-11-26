@@ -21,6 +21,9 @@ export const DIGEST_CHANNELS = [
   'cryptoquant_official',
 ] as const
 
-// How many rows of each feed the glance list shows.
-export const MARKET_ROWS = 10
+// How many rows of each feed the glance list shows. Day 5: the markets
+// feed went 10 → 15 headline markets — the audit (COMPETITORS.md) showed
+// rivals surfacing 1–3 markets; depth at the same one-fact-per-row format
+// is the differentiator, and the list scrolls.
+export const MARKET_ROWS = 15
 export const DIGEST_ROWS = 10

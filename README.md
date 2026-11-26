@@ -3,26 +3,30 @@
 **Glance** puts the things a crypto holder checks fifty times a day —
 BTC/ETH spot, live prediction-market odds and the whale/news wire — into a
 single glance on Even Realities G2 glasses. The home screen *is* the
-answer: spot prices, your top watched market, the latest headline. One tap
-goes deeper; one more tap composes a shareable brief. If a market you
-watch moves 3+ points, the glasses tell you. No phone out of the pocket,
-no doom-scrolling.
+answer: spot prices, your top watched market, the day's biggest mover,
+the latest headline. One tap goes deeper; one more tap composes a
+shareable brief — or opens a paper position that marks to market on the
+same screen. If a market you watch moves 3+ points, the glasses tell you.
+No phone out of the pocket, no doom-scrolling.
 
 Built for the Even Realities **"Heads Up" Hackathon** (DoraHacks), entering
 two tracks with one genuinely connected app:
 
 - **Track 02 — Crypto & DeFi (primary):** live Polymarket odds for the
-  headline crypto markets, price-first, with 24h price history, a
-  persistent watchlist and move alerts.
+  top-15 headline crypto markets, price-first, with 24h price history, a
+  persistent watchlist with move alerts, and persistent paper positions
+  marked to market.
 - **Track 01 — Messaging & News (secondary):** a merged, timestamped digest
-  of five public Telegram crypto channels (whale alerts + headlines) — the
-  same glance, the same tap flow.
+  of five public Telegram crypto channels (whale alerts + headlines), with
+  market-moving keyword flags (BTC / ETH / ETF) — the same glance, the
+  same tap flow.
 
-![Home glance — BTC/ETH spot, top watched market, latest headline](app/docs/day4-home.png)
+![Home glance — spot, top watched market, biggest mover, flagged headline](app/docs/day5-home.png)
+![Paper position — marked to market on the detail screen](app/docs/day5-paper-pnl.png)
+![Market detail — 24h trend with per-step direction arrows](app/docs/day5-trend-arrows.png)
+![Digest — keyword-flagged posts marked with !](app/docs/day5-digest-flags.png)
 ![Watch alert — a watched market moved +5.0 pts since the last check](app/docs/day4-alert.png)
-![Market detail — YES/NO, day move, volume, liquidity, 24h price trend](app/docs/day4-trend-detail.png)
 ![Morning brief — spot, top markets and the wire, composed in one tap](app/docs/day4-morning-brief.png)
-![Digest list — five Telegram channels merged, age + source per row](app/docs/day4-digest.png)
 
 ## Quick start (judges: three one-command steps)
 
@@ -46,7 +50,9 @@ Then run it:
 - **Simulator (free, no glasses needed):** `npm run simulate`
 - **Real G2 glasses:** `npx evenhub qr --url http://<your-lan-ip>:5173` and
   scan with the Even Hub companion app.
-- **Package a build:** `npm run pack` → `out.ehpk`.
+- **Package a build:** `npm run pack` → `out.ehpk`. A ready-made package
+  of the current build ships in this repo as **`app/glance.ehpk`** — the
+  installable build, no toolchain needed.
 
 The app renders live data within seconds. If the proxy is not running, the
 markets feed tries Polymarket Gamma directly (see *Data path* below) and the
@@ -57,24 +63,37 @@ blank screen.
 
 - **Home glance** — the app's promise in one screen, shown at startup:
   BTC + ETH spot with 24h change, any watch alert, the top watched (or
-  top) market with its Yes %, and the single latest headline — each row
-  one tap from its detail.
-- **Markets list** — the top crypto events on Polymarket right now, one
-  headline market per event (its most-traded market — no sub-market floods),
-  each row price-first: `Yes 13% · Will Bitcoin dip to $55,000 in November?`
+  top) market with its Yes %, a **biggest-mover row** (the fetched market
+  with the largest 24h move, when it isn't already the top row), and the
+  single latest headline — each row one tap from its detail. The footer
+  counts what you hold: `1 watching · 1 paper open`.
+- **Markets list** — the **top 15** crypto events on Polymarket right
+  now, one headline market per event (its most-traded market — no
+  sub-market floods), each row price-first:
+  `Yes 13% · Will Bitcoin dip to $55,000 in November?`
 - **Market detail** — YES/NO prices, 1-day price move, 24h volume,
-  liquidity, parent event — plus the market's **24h price trend**
-  (`24h: 30→35→44→22→16→13`, hourly samples from the Polymarket CLOB
-  history endpoint).
+  liquidity — plus the market's **24h price trend** with a direction
+  arrow per hourly step (`24h: 66↓65→65↓61↑62→62`, samples from the
+  Polymarket CLOB history endpoint; ↑/↓/→ all verified against the G2
+  font in the framebuffer).
 - **Watchlist + alerts** — one tap on a market detail pins it to the top
   of the list with a ★; the set persists across restarts (localStorage),
   together with the last-seen price of each watched market. Between
   refreshes, a move of **≥3 points** flags the row (`▲+5.0`), adds an
   alert line to the detail, and puts an alert row on the home screen.
+- **Paper positions** — one tap on a market detail opens a $100 paper
+  position on YES or NO at the live price; the detail then carries its
+  live mark (`Paper YES $100.00 @62% → $113.82 (+$13.82)`) and a one-tap
+  close that settles at the live price. Positions persist across
+  restarts (localStorage), one per market. Paper only — no funds, no
+  keys, nothing leaves the device.
 - **Digest list** — the latest posts from five public Telegram channels
   (`whale_alert_io`, `cointelegraph`, `WatcherGuru`, `unfolded`,
   `cryptoquant_official`), merged newest-first, deduped, each row tagged
-  with age + source; detail shows the full message.
+  with age + source. Posts mentioning **BTC, ETH or ETF** are flagged
+  with a `!` marker in the list (and on the home headline), and the post
+  detail names what it matched (`Mentions: BTC · ETF`) — so a glance at
+  the wire already tells you which posts can move your markets.
 - **Brief** — one tap rewrites any market or post as a single shareable
   line, composed on-device from the live numbers. No LLM round-trip: the
   draft is already written when you look.
@@ -155,8 +174,10 @@ primary, always-reproducible path, and it is what the demo video uses.
   `WatcherGuru`, `unfolded`, `cryptoquant_official`; channels without a
   public preview, e.g. CoinDesk's or WuBlockchain's, are excluded rather
   than scraped some other way).
-- **No keys, no accounts, no user funds, no writes** anywhere in the
-  system. The watchlist lives in the app's local storage on the device.
+- **No keys, no accounts, no user funds, no server-side writes**
+  anywhere in the system. The watchlist and the paper positions live in
+  the app's local storage on the device; paper trading is simulated
+  on-device and never touches a real order book.
 
 ## An honest note on voice
 
@@ -191,8 +212,8 @@ the G2 font silently drops), is in [`BUILDLOG.md`](BUILDLOG.md).
 | Rubric line | How Glance answers it |
 | --- | --- |
 | Usefulness on G2 (25%) | The highest-frequency crypto checks — spot, odds, whale/news wire — in one home glance, on the device you are already wearing; watch alerts mean the glasses speak first when a market you follow moves ≥3 pts. |
-| Read-and-write (20%) | Read: spot, both feeds, 24h trends, live. Write/act in seconds: one tap pins a market to a persistent watchlist; one tap composes a shareable one-line brief; one tap composes the full morning brief (spot + top markets + the wire). |
-| Technical execution (20%) | End-to-end on **real accounts-free live data**, not mocks: real Polymarket odds + CLOB price history, real CoinGecko spot, real Telegram posts from five channels, verified in the simulator at every step (see `app/docs/day2-*.png`, `app/docs/day4-*.png` and `BUILDLOG.md`). Zero-dependency proxy with a stale-while-revalidate cache; offline/STALE states tested by killing the proxy mid-flight; the watch-alert path exercised end-to-end against a local test double (documented in the log). Even Hub SDK 0.0.16, adopted only after a full scratch re-verification. |
+| Read-and-write (20%) | Read: spot, both feeds, 24h trends, live. Write/act in seconds: one tap pins a market to a persistent watchlist; one tap opens/closes a persistent paper position marked to market; one tap composes a shareable one-line brief; one tap composes the full morning brief (spot + top markets + the wire). |
+| Technical execution (20%) | End-to-end on **real accounts-free live data**, not mocks: real Polymarket odds + CLOB price history, real CoinGecko spot, real Telegram posts from five channels, verified in the simulator at every step (see `app/docs/day2-*.png`, `app/docs/day4-*.png`, `app/docs/day5-*.png` and `BUILDLOG.md`). Zero-dependency proxy with a stale-while-revalidate cache; offline/STALE states tested by killing the proxy mid-flight; the watch-alert and paper-P&L paths exercised end-to-end against a local test double (documented in the log). Even Hub SDK 0.0.16, adopted only after a full scratch re-verification. The installable `app/glance.ehpk` ships in the repo. |
 | UX for display/voice (15%) | Designed for 576×288 monochrome: price-first rows within the firmware's 63-byte cap, one fact per row, double-tap back, header clock + STALE honesty; every glyph used was verified against the G2 font (block-char sparklines were prototyped, found missing from the font, and replaced with a textual trend). Voice: honestly scoped out (see the voice note) instead of faked. |
 | Business potential + safety (20%) | A plausible companion for any odds/news source (the feed layer is source-agnostic); read-only by construction — no keys, no custody, no trading, no user funds at risk. |
 
@@ -203,6 +224,7 @@ the G2 font silently drops), is in [`BUILDLOG.md`](BUILDLOG.md).
 ├── BUILDLOG.md          day-by-day build log with verification evidence
 └── app/
     ├── app.json         Even Hub manifest (network whitelist, permissions)
+    ├── glance.ehpk      installable package of the current build
     ├── index.html       WebView host page
     ├── package.json     scripts: dev / build / pack / simulate / proxy
     ├── server/proxy.mjs zero-dependency backend proxy

@@ -278,14 +278,30 @@ export function marketRow(m: Market, watched: boolean, alertDelta?: number | nul
   return clampItem(`${head}${m.question}`)
 }
 
-/** Digest list row — age + source first, then the headline. */
-export function postRow(p: Post, now = Date.now()): string {
-  const age = relTime(p.ts, now)
-  return clampItem(`${age ? `${age} ` : ''}@${p.channel}: ${p.text}`)
+/** Market-moving keywords a digest post can be flagged for. The wire is
+ *  five channels of firehose; a post that names BTC, ETH or an ETF is the
+ *  one most likely to explain the next odds move, so it gets a marker. */
+const FLAG_PATTERNS: { tag: string; re: RegExp }[] = [
+  { tag: 'BTC', re: /\bBTC\b|\$BTC\b|Bitcoin/i },
+  { tag: 'ETH', re: /\bETH\b|\$ETH\b|Ethereum/i },
+  { tag: 'ETF', re: /\bETF\b/ },
+]
+export function postFlags(p: Post): string[] {
+  return FLAG_PATTERNS.filter((f) => f.re.test(p.text)).map((f) => f.tag)
 }
 
-/** Market detail page body. */
-export function marketDetail(m: Market): string {
+/** Digest list row — age + source first, then the headline. Posts that
+ *  mention BTC/ETH/ETF are prefixed with the alert marker `!` (the same
+ *  marker HOME uses for "look at this first"). */
+export function postRow(p: Post, now = Date.now()): string {
+  const age = relTime(p.ts, now)
+  const flag = postFlags(p).length ? '! ' : ''
+  return clampItem(`${flag}${age ? `${age} ` : ''}@${p.channel}: ${p.text}`)
+}
+
+/** Market detail lines; the Event line (when present) is always last so
+ *  callers can pop it and re-append it after higher-value lines. */
+export function marketDetailLines(m: Market): string[] {
   const yes = yesPct(m)
   const no = noPct(m)
   const lines = [m.question]
@@ -294,13 +310,20 @@ export function marketDetail(m: Market): string {
   if (mv) lines.push(`1d move: ${mv}`)
   lines.push(`24h vol ${fmtUsd(m.volume24hr)} · liquidity ${fmtUsd(m.liquidity)}`)
   if (m.eventTitle && m.eventTitle !== m.question) lines.push(`Event: ${m.eventTitle}`)
-  return lines.join('\n')
+  return lines
+}
+
+/** Market detail page body. */
+export function marketDetail(m: Market): string {
+  return marketDetailLines(m).join('\n')
 }
 
 /** Digest detail page body — the full message. */
 export function postDetail(p: Post, now = Date.now()): string {
   const age = relTime(p.ts, now)
-  return `@${p.channel}${age ? ` · ${age} ago` : ''}\n${p.text}`
+  const flags = postFlags(p)
+  const head = `@${p.channel}${age ? ` · ${age} ago` : ''}`
+  return flags.length ? `${head}\nMentions: ${flags.join(' · ')}\n${p.text}` : `${head}\n${p.text}`
 }
 
 // --- One-line briefs (the read-and-write "act in seconds" action) --------------
@@ -350,7 +373,10 @@ export function spotLine(spot: Spot): string {
 
 // --- Price-history trend (market detail) ------------------------------------------
 
-/** "24h: 30→29→36→47→25→15" — six samples across the day, one line. */
+/** "24h: 30↑35↑44↓22↓16↓13" — six samples across the day, one line, each
+ *  separator showing the direction into the next sample (↑ up, ↓ down,
+ *  → flat). Day 5: ↑/↓ (U+2191/U+2193) were verified for ink in the
+ *  simulator framebuffer before adoption — see BUILDLOG Day 5. */
 export function trendStrip(points: HistoryPoint[]): string {
   if (points.length < 2) return ''
   const picks: number[] = []
@@ -359,13 +385,75 @@ export function trendStrip(points: HistoryPoint[]): string {
     const idx = Math.round((i * (points.length - 1)) / (n - 1))
     picks.push(Math.round(points[idx].p * 100))
   }
-  return `24h: ${picks.join('→')}`
+  let out = `24h: ${picks[0]}`
+  for (let i = 1; i < picks.length; i++) {
+    out += `${picks[i] > picks[i - 1] ? '↑' : picks[i] < picks[i - 1] ? '↓' : '→'}${picks[i]}`
+  }
+  return out
 }
 
 // NOTE: a block-char sparkline (U+2581–U+2588) was prototyped and cut —
 // framebuffer analysis in the simulator showed zero ink for those glyphs
 // (not in the LVGL font, silently dropped like ⇄/✎). The textual strip
 // above is the shipped trend rendering.
+
+// --- Biggest mover (home glance) -------------------------------------------------
+// One of the home rows answers "what moved most while I wasn't looking":
+// the fetched market with the largest absolute 24h move, whatever it is.
+
+export function biggestMover(markets: Market[]): Market | null {
+  let best: Market | null = null
+  for (const m of markets) {
+    if (m.oneDayPriceChange == null || !Number.isFinite(m.oneDayPriceChange)) continue
+    if (!best || Math.abs(m.oneDayPriceChange) > Math.abs(best.oneDayPriceChange!)) best = m
+  }
+  return best
+}
+
+/** Home row label: "Biggest move: Yes 62% ▲12.4 pts · Will …?" */
+export function moverLabel(m: Market): string {
+  const pct = yesPct(m)
+  const mv = moveStr(m)
+  return clampItem(
+    `Biggest move: ${pct === null ? '' : `Yes ${pct}% `}${mv.replace(' today', '')} · ${m.question}`,
+  )
+}
+
+// --- Paper positions (paper trading on live odds) ---------------------------------
+// The field's dominant write action (see COMPETITORS.md) is paper trading;
+// Glance's version stays inside the money-safety rules: a fixed $100 paper
+// stake per position, priced off the LIVE odds, marked to market on every
+// render, settled only on paper. No wallet, no keys, no real funds — the
+// position is a localStorage record and arithmetic.
+
+export const PAPER_STAKE = 100
+
+export interface PaperPos {
+  side: 'yes' | 'no'
+  entry: number // entry price as a fraction (0..1) of the chosen side
+  stake: number // paper dollars
+}
+
+const fmtMoney = (n: number): string =>
+  `${n < 0 ? '-$' : '$'}${Math.abs(n).toFixed(2)}`
+const fmtSignedMoney = (n: number): string =>
+  `${n < 0 ? '-$' : '+$'}${Math.abs(n).toFixed(2)}`
+
+/** Current paper value of a position in market `m` (null if unpriceable). */
+export function paperValue(pos: PaperPos, m: Market): number | null {
+  const frac = Number(m.prices?.[pos.side === 'yes' ? 0 : 1])
+  if (!Number.isFinite(frac) || pos.entry <= 0) return null
+  // Shares bought = stake / entry; value = shares × current fraction.
+  return (pos.stake / pos.entry) * frac
+}
+
+/** Detail line: "Paper YES $100.00 @38% → $131.58 (+$31.58)". */
+export function paperLine(pos: PaperPos, m: Market): string {
+  const value = paperValue(pos, m)
+  const head = `Paper ${pos.side.toUpperCase()} ${fmtMoney(pos.stake)} @${Math.round(pos.entry * 100)}%`
+  if (value === null) return `${head} → —`
+  return `${head} → ${fmtMoney(value)} (${fmtSignedMoney(value - pos.stake)})`
+}
 
 // --- Morning brief (the read-and-write centerpiece) -------------------------------
 // One tap composes the whole morning: spot, the top markets, the wire.

@@ -279,7 +279,7 @@ const server = createServer(async (req, res) => {
 server.listen(PORT, () => {
   console.log(`glance-proxy listening on :${PORT}`)
   // Pre-warm the default views so the first glance is instant.
-  void cached('markets:10', 20_000, () => fetchMarkets(10)).catch(() => {})
+  void cached('markets:15', 20_000, () => fetchMarkets(15)).catch(() => {})
   void cached(`digest:${DEFAULT_CHANNELS.join(',')}:10`, 45_000, () => fetchDigest(DEFAULT_CHANNELS, 10)).catch(() => {})
   void cached('spot', 30_000, fetchSpot).catch(() => {})
 })

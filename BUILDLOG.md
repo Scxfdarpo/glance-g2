@@ -487,3 +487,115 @@ handler follows the official template's pattern.)
   user's explicit go-ahead; the repo page was fetched afterwards to
   confirm the README and screenshots render.
 ```
+
+## Day 5 — 2026-11-26: competitor audit + dominance pass
+
+### Audit first (COMPETITORS.md)
+
+The DoraHacks build list is AWS-WAF-blocked for automated reads
+(405/captcha on every route), so the field was catalogued from the
+~85 self-describing GitHub repos a public-repo submission produces,
+plus search. Closest rivals: **GlanceWire** (same two tracks + Best
+Telegram aim; paper book with P&L), **PolyGlance** (paper portfolio,
+price + odds alerts, voice via Groq Whisper), **HeadsUp Markets**
+(backend paper ledger echoed into a Telegram bot; degrades to [MOCK]
+fixtures), **EvenPulse** (image-rendered sparklines via
+`updateImageRawData`, $10k paper desk), **GlanceFi G2** (paper intent
+with SHA-256 receipt). Field gaps: mocks/fixtures are common, odds
+depth is shallow (1–3 markets typical), persistence is rare, nobody
+flags market-moving keywords in the news wire, `.ehpk` often missing.
+
+### Adopted (and why)
+
+- **Paper positions** — the field's standard write action, done our
+  way: $100 stake, one open position per market, stored on-device
+  (`glance:paper:v1`), detail line marks it to the live price
+  (`stake/entry × current`), one-tap close settles at the live price.
+  No backend, no account — persistence without a server.
+- **Markets depth 10 → 15** — same price-first row format, proxy
+  pre-warm raised to match. Verified scrollable in the framebuffer.
+- **Biggest-mover home row** — largest |24h move| among fetched
+  markets, skipped when it duplicates the top row; tap opens it.
+- **Digest keyword flags** — posts matching BTC/ETH/ETF (word-
+  boundary patterns) get a `!` row prefix (list + home headline) and
+  a `Mentions: BTC · ETF` line in the post detail. The audit found
+  nobody doing this; it's the cheapest real signal on the wire.
+- **Trend strip direction arrows** — hourly samples now joined by
+  ↑/↓/→ per step. All three glyphs framebuffer-verified (the Day-2/4
+  strips used `→` only, out of caution).
+- **`.ehpk` shipped** — `app/glance.ehpk` (42 KB, force-added past
+  the `*.ehpk` ignore rule) and referenced in the README as the
+  installable build.
+
+### Dropped / deferred, deliberately
+
+- **Voice via external ASR** (PolyGlance/HeadsUp News use Whisper/
+  Deepgram keys): still no ASR in the SDK and no mic in the
+  simulator; bolting on a keyed cloud service to demo an untestable
+  path stays against the project's honesty rule.
+- **Image sparklines** (EvenPulse): real technique, but the textual
+  strip with arrows carries the same information at zero image
+  pipeline cost, and every glyph is font-verified.
+- **Backend paper ledger** (HeadsUp Markets): their own repo shows
+  the failure mode — the app degrades to [MOCK] data when the
+  backend is down. On-device state can't 502.
+
+### Two bugs the verification caught
+
+- **Detail layout budget:** shrinking the detail body (168→140px)
+  for the longer action list pushed the trend strip below the fold —
+  it rendered but the action list covered it. Fix: line order is now
+  a visibility budget (question → YES/NO → move → vol → strip →
+  paper → alert), the redundant Event line (a vaguer copy of the
+  question for headline markets) no longer takes a detail line, and
+  the split settled at 160/88. Strip and paper line both verified
+  fully visible.
+- **Test-double CORS trap:** the P&L test double initially omitted
+  `access-control-allow-origin`, the WebView rejected its responses,
+  and the app *silently fell back to direct Gamma prices* — the
+  doctored price never landed while other fields updated. A double
+  must mirror the real proxy's headers exactly; noted for any future
+  double work.
+
+### Verification (all framebuffer, live data unless stated)
+
+| File | Shows |
+| --- | --- |
+| `day5-home.png` | HOME: mover row, footer `1 watching · 0 paper open` |
+| `day5-markets.png` / `day5-markets-deep.png` | 15-market list, scrolled past row 10 |
+| `day5-trend-arrows.png` | Detail: `24h: 66↓65→65↓61↑62→62` — ↑↓→ ink-verified |
+| `day5-paper-open.png` | Paper line at entry (+$0.00), close action, after a cold restart (persistence) |
+| `day5-paper-pnl.png` | Test double at YES 0.70 vs entry 0.615: `→ $113.82 (+$13.82)` — the app's own mark-to-market |
+| `day5-paper-close.png` | After close: paper line gone, buy rows restored |
+| `day5-digest-flags.png` | `!`-flagged Bitcoin post; USDT transfers correctly unflagged |
+| `day5-digest-detail.png` | Post detail: `Mentions: BTC` |
+
+The paper position also survived a full VM runtime restart
+(localStorage intact: `1 watching · 1 paper open` on the next cold
+start). Environment note: that restart wiped /tmp and the
+apt-installed WebKitGTK; the simulator was revived without apt by
+extracting the cached .debs and pointing `LD_LIBRARY_PATH`, the
+WebKit helper dir (symlink) and `__EGL_VENDOR_LIBRARY_FILENAMES` at
+the extraction, with `WEBKIT_DISABLE_COMPOSITING_MODE=1`.
+
+### Demo video (re-cut — features changed materially)
+
+- `demo/glance-demo.mp4` — **52.8 s, 1152×648, H.264, 845 KB** (copy
+  in `~/workspace/your_files/Glance-demo.mp4`). Same pipeline as
+  Days 3–4; beats frame-checked on a contact sheet and caption
+  windows pinned to the exact frames before assembly.
+- Beats: home (mover row) → markets (15, scrolled) → detail (trend
+  arrows) → paper open → digest (flagged row) → post detail
+  (Mentions) → morning brief. All live data, no test double during
+  recording (the position opened on camera sits at +$0.00, as an
+  honest at-entry mark does).
+- The YouTube link on the BUIDL still serves the Day-4 cut until it
+  is re-uploaded/swapped (parent task); the repo carries the new cut.
+
+### Publication
+
+- Repo: https://github.com/Scxfdarpo/glance-g2 — Day-5 commit pushed
+  (code, docs, screenshots, `glance.ehpk`, this log, README).
+- `BUIDL-DESCRIPTION-V2.md` (full replacement description) and
+  `DEMO-DAY.md` (3-minute remote-demo script + honest judge Q&A)
+  prepared in the project root for the parent to apply/use.
