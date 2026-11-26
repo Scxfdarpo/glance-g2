@@ -1,0 +1,12 @@
+# Dependencies (reinstall with `npm install` in app/)
+node_modules/
+
+# Build outputs
+app/dist/
+*.ehpk
+
+# Local tooling / runtime state
+tools/
+tunnel-url.txt
+*.log
+.DS_Store
