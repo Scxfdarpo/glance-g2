@@ -53,9 +53,10 @@ npm run proxy            # → http://localhost:8787  (GET /health → {"ok":tru
 npm run dev              # → http://localhost:5173
 
 # 4) OPTIONAL — voice commands (terminal C): the local speech-to-text
-#    service (faster-whisper, runs entirely on this machine). The first
-#    run creates its Python venv under server/stt/; see BUILDLOG Day 6.
-npm run stt              # → http://localhost:8787/stt is live once this is up
+#    service (faster-whisper, runs entirely on this machine).
+#    One-time setup, then the run command:
+python3 -m venv server/stt/.venv && server/stt/.venv/bin/pip install faster-whisper
+npm run stt              # → the proxy's POST /stt is live once this is up
 ```
 
 Then run it:
