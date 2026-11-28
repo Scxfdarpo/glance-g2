@@ -599,3 +599,126 @@ the extraction, with `WEBKIT_DISABLE_COMPOSITING_MODE=1`.
 - `BUIDL-DESCRIPTION-V2.md` (full replacement description) and
   `DEMO-DAY.md` (3-minute remote-demo script + honest judge Q&A)
   prepared in the project root for the parent to apply/use.
+
+## Day 6 — 2026-11-28: final upgrade — voice, five-coin spot, perps
+
+(A competitor audit the same day found the strongest rival,
+PolyGlance v8, ahead on exactly three things: working voice via
+server-side STT, 5-coin spot, and Hyperliquid perps. This pass
+answers all three — each shipped only because it verified.)
+
+### 1. Voice commands — local Whisper behind the proxy (SHIPPED)
+
+- **Architecture:** the app records through the SDK
+  (`audioControl(true, Glasses)` + `audioEvent.audioPcm` frame
+  accumulation in `src/main.ts`), concatenates the raw PCM
+  (s16le, 16 kHz, mono — the SDK frame format) and POSTs it to the
+  proxy's new `/stt` endpoint (`src/voice.ts`). The proxy forwards
+  the bytes untouched to a new **local STT service**
+  (`app/server/stt/stt_server.py`, Python + faster-whisper, Whisper
+  **base** model int8 on CPU, port 8788, `npm run stt`), which
+  transcribes and parses a deterministic intent set: price (per
+  coin), markets, top market, digest, morning brief, perps, watch
+  <query>, home. The app executes the intent through the same
+  actions the taps use (`applyVoiceResult` in `src/main.ts`).
+  **No cloud ASR, no API key** — the Day-5 "dropped" rationale was
+  specifically about keyed cloud services; a local model removes
+  that objection.
+- **Model choice, benchmarked** (`server/stt/bench.py`): tiny and
+  base both transcribed all 7 test commands correctly; tiny at
+  0.5–1.2 s/clip, base at 0.9–2.6 s. Base shipped (robustness for
+  real voices), `GLANCE_STT_MODEL` can switch it.
+- **Test corpus:** 7 spoken commands synthesized (Google Translate
+  TTS voice), converted to raw PCM in the exact wire format
+  (`server/stt/samples/`). HTTP suite `server/stt/test_stt.py`
+  POSTs each clip through the real path: **7/7 PASS** direct to the
+  STT service and **7/7 PASS** via the proxy's `/stt`, ~1–2 s per
+  command after warm-up.
+- **⚠️ Trap #4 — the CORS preflight only a POST can trigger.** The
+  verification page's first runs failed at the transcribe step with
+  a bare "Load failed" while every GET worked. Cause: the `/stt`
+  POST's `application/octet-stream` content type is not
+  CORS-safelisted, so the WebView sends an OPTIONS preflight — and
+  the proxy 404'd it. On hardware this would have broken voice in
+  exactly the same way; the taps could never have caught it. Fix:
+  the proxy answers OPTIONS with 204 + allow-methods/headers
+  (verified with curl; the in-simulator page then ran end-to-end).
+- **In-simulator verification (test double, same pattern as the
+  Day-4 alert double):** `app/voice-test.html` + `src/voice-test.ts`
+  (dev-only, excluded from the shipped build — dist verified to
+  contain only index.html) fetch a recorded command's PCM from the
+  proxy's `/voice-samples/` route and run it through the shared
+  `transcribePcm()`, rendering each state on the glasses display:
+  READY → FEEDING → PROCESSING → RESULT, framebuffer-captured
+  (`day6-voice-test.png`, `day6-voice-feeding.png`,
+  `day6-voice-processing.png`, `day6-voice-result.png` —
+  "Watch bitcoin" → intent watch · BTC · "bitcoin", 1,336 ms;
+  `day6-voice-result-price.png` — "Bitcoin price" → price · BTC).
+- **The app's own voice view** renders in the simulator: idle state
+  with the command list (`day6-voice-idle.png`), and tapping LISTEN
+  reaches the designed honest state — `audioControl` returns false
+  in the simulator (re-confirmed on SDK 0.0.16), so the view says
+  the mic is unavailable in this environment and why
+  (`day6-voice-nomic.png`). The LISTENING/PROCESSING/RESULT states
+  render through the verification page, which shares the pipeline
+  code; the app's result rendering is the same state machine driven
+  by the same `SttResult`.
+- **Not verified, stated everywhere it matters:** real-microphone
+  capture on physical hardware. README + BUIDL V3 carry the exact
+  boundary.
+
+### 2. Five-coin spot (SHIPPED)
+
+- Proxy `/api/spot` and the app's CoinGecko fallback now fetch BTC,
+  ETH, SOL, DOGE, XRP (Kraken fallback extended to all five pairs).
+- HOME carries two spot rows; the morning brief carries both lines.
+- **Byte-cap catch:** the first framebuffer pass showed XRP's 24h
+  change clipped by the 63-byte clamp (~61-byte row). The second
+  row now uses a compact form (no space before the change arrow,
+  glance-precision prices: `$70.9`, `$0.057`, `$0.940`) at ~58
+  bytes — all five prices *and* changes survive
+  (`day6-home.png`, `day6-morning.png`).
+
+### 3. Hyperliquid perps panel (SHIPPED)
+
+- Proxy `/api/perps` slims one `metaAndAssetCtxs` POST to BTC/ETH/
+  SOL {markPx, hourly funding, open interest (coins + USD), day
+  change}; the app fetches it with the other feeds (direct-POST
+  fallback implemented the same way) and renders a PERPS view off
+  HOME (`day6-perps.png`: BTC perp $59,543 ▼3.3%, funding
+  −0.0001%/h, OI $2.06B; ETH likewise; SOL below the fold).
+  `api.hyperliquid.xyz` added to the `app.json` whitelist.
+  `fmtUsd` gained a $B tier for open interest.
+
+### Verification (all framebuffer, live data unless stated)
+
+| File | Shows |
+| --- | --- |
+| `day6-home.png` | HOME: two spot rows, all 5 coins with prices + changes |
+| `day6-home-doors.png` | HOME scrolled: flagged headline, Voice door, Markets door |
+| `day6-voice-idle.png` | Voice view idle: instructions + command list + LISTEN |
+| `day6-voice-nomic.png` | Voice view after LISTEN in the simulator: honest mic-unavailable state |
+| `day6-voice-test.png` | Verification page READY (clip plays the role of the mic — labelled) |
+| `day6-voice-feeding.png` | FEEDING: 44,544 bytes, SDK frame format |
+| `day6-voice-processing.png` | PROCESSING: POST /stt → local Whisper |
+| `day6-voice-result.png` | RESULT: "Watch bitcoin" → watch intent + the app's action |
+| `day6-voice-result-price.png` | RESULT: "Bitcoin price" → price intent · BTC |
+| `day6-perps.png` | Perps panel with live Hyperliquid data |
+| `day6-morning.png` | Morning brief with both five-coin spot lines |
+| `day6-detail.png` | Regression: market detail (trend strip, watch, paper) intact |
+
+Plus: `test_stt.py` 7/7 via proxy and 7/7 direct; `npm run build`
+clean; `npm run pack` → `glance.ehpk` **45,058 bytes** (app version
+0.4.0); dist contains only the app page (verification page excluded).
+
+### Publication
+
+- README updated (voice note rewritten to the shipped pipeline +
+  exact verification boundary; rubric table re-weighted to the live
+  page: Usefulness 30 / Read-and-write 25 / Technical 20 / UX
+  display+voice 15 / Business-safety 10).
+- `BUIDL-DESCRIPTION-V3.md` prepared for the parent (with a change
+  list vs V2 at the top). `DEMO-DAY.md` refreshed for the corrected
+  schedule — top-20 announced Nov 30–Dec 1, online pitch on Discord
+  Dec 1 evening Dubai time, Dec 3 is an awards ceremony with no
+  pitches — and the script now includes perps and voice beats.

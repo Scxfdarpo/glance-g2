@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "pack": "npm run build && evenhub pack app.json dist",
     "simulate": "evenhub-simulator http://localhost:5173",
-    "proxy": "node server/proxy.mjs"
+    "proxy": "node server/proxy.mjs",
+    "stt": "server/stt/.venv/bin/python server/stt/stt_server.py"
   },
   "dependencies": {
     "@evenrealities/even_hub_sdk": "^0.0.16"

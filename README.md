@@ -1,27 +1,35 @@
 # Glance — Polymarket odds + Telegram crypto digest on Even Realities G2
 
 **Glance** puts the things a crypto holder checks fifty times a day —
-BTC/ETH spot, live prediction-market odds and the whale/news wire — into a
-single glance on Even Realities G2 glasses. The home screen *is* the
-answer: spot prices, your top watched market, the day's biggest mover,
-the latest headline. One tap goes deeper; one more tap composes a
-shareable brief — or opens a paper position that marks to market on the
-same screen. If a market you watch moves 3+ points, the glasses tell you.
-No phone out of the pocket, no doom-scrolling.
+five-coin spot, live prediction-market odds, Hyperliquid perpetuals and
+the whale/news wire — into a single glance on Even Realities G2 glasses.
+The home screen *is* the answer: spot prices, your top watched market,
+the day's biggest mover, the latest headline. One tap goes deeper; one
+more tap composes a shareable brief — or opens a paper position that
+marks to market on the same screen. If a market you watch moves 3+
+points, the glasses tell you. And you can simply **ask**: tap, say
+*"bitcoin price"* or *"watch bitcoin"*, and Glance carries it out —
+voice commands are transcribed by a local Whisper model on Glance's own
+server, no cloud ASR, no API key. No phone out of the pocket, no
+doom-scrolling.
 
 Built for the Even Realities **"Heads Up" Hackathon** (DoraHacks), entering
 two tracks with one genuinely connected app:
 
 - **Track 02 — Crypto & DeFi (primary):** live Polymarket odds for the
   top-15 headline crypto markets, price-first, with 24h price history, a
-  persistent watchlist with move alerts, and persistent paper positions
-  marked to market.
+  persistent watchlist with move alerts, persistent paper positions
+  marked to market, five-coin spot (BTC/ETH/SOL/DOGE/XRP) and a
+  Hyperliquid perpetuals panel (mark price, hourly funding, open
+  interest) — plus working voice commands over all of it.
 - **Track 01 — Messaging & News (secondary):** a merged, timestamped digest
   of five public Telegram crypto channels (whale alerts + headlines), with
   market-moving keyword flags (BTC / ETH / ETF) — the same glance, the
   same tap flow.
 
-![Home glance — spot, top watched market, biggest mover, flagged headline](app/docs/day5-home.png)
+![Home glance — five-coin spot, top watched market, biggest mover](app/docs/day6-home.png)
+![Voice pipeline, verified in the simulator — a recorded "watch bitcoin" is heard, parsed and answered with the action the app executes](app/docs/day6-voice-result.png)
+![Perps panel — Hyperliquid mark price, hourly funding, open interest, live](app/docs/day6-perps.png)
 ![Paper position — marked to market on the detail screen](app/docs/day5-paper-pnl.png)
 ![Market detail — 24h trend with per-step direction arrows](app/docs/day5-trend-arrows.png)
 ![Digest — keyword-flagged posts marked with !](app/docs/day5-digest-flags.png)
@@ -43,6 +51,11 @@ npm run proxy            # → http://localhost:8787  (GET /health → {"ok":tru
 
 # 3) Start the app (terminal B)
 npm run dev              # → http://localhost:5173
+
+# 4) OPTIONAL — voice commands (terminal C): the local speech-to-text
+#    service (faster-whisper, runs entirely on this machine). The first
+#    run creates its Python venv under server/stt/; see BUILDLOG Day 6.
+npm run stt              # → http://localhost:8787/stt is live once this is up
 ```
 
 Then run it:
@@ -62,11 +75,27 @@ blank screen.
 ## What it does
 
 - **Home glance** — the app's promise in one screen, shown at startup:
-  BTC + ETH spot with 24h change, any watch alert, the top watched (or
-  top) market with its Yes %, a **biggest-mover row** (the fetched market
-  with the largest 24h move, when it isn't already the top row), and the
-  single latest headline — each row one tap from its detail. The footer
+  **five-coin spot** (BTC/ETH on one row, SOL/DOGE/XRP on the next, all
+  with 24h change), any watch alert, the top watched (or top) market
+  with its Yes %, a **biggest-mover row** (the fetched market with the
+  largest 24h move, when it isn't already the top row), and the single
+  latest headline — each row one tap from its detail. The footer
   counts what you hold: `1 watching · 1 paper open`.
+- **Voice commands** — one tap from home opens the voice view: tap
+  LISTEN, speak, tap STOP. The app accumulates the microphone's raw
+  PCM from the SDK and sends it to the Glance server, where a **local
+  Whisper model** (faster-whisper, on the same machine — no cloud ASR,
+  no API key) transcribes it and a small deterministic parser turns it
+  into an intent: *"bitcoin price"* (answered on the spot screen),
+  *"show markets"*, *"top market"*, *"watch bitcoin"* (watches the
+  first matching live market and opens it), *"morning brief"*,
+  *"latest news"*, *"perps"*. The intent then runs through the very
+  same actions the taps use. Verified end-to-end in the simulator with
+  recorded spoken commands fed through the exact code path — see the
+  voice note below for precisely what is and isn't proven.
+- **Perps panel** — BTC/ETH/SOL perpetuals from Hyperliquid's public
+  API: mark price with the day move, **hourly funding rate** and
+  **open interest** in USD, refreshed with the other feeds.
 - **Markets list** — the **top 15** crypto events on Polymarket right
   now, one headline market per event (its most-traded market — no
   sub-market floods), each row price-first:
@@ -98,8 +127,8 @@ blank screen.
   line, composed on-device from the live numbers. No LLM round-trip: the
   draft is already written when you look.
 - **Morning brief** — one tap from home composes the whole morning on one
-  screen: the BTC/ETH line, the top-3 markets with odds, the top-2
-  headlines — ready to share.
+  screen: the five-coin spot lines, the top-3 markets with odds, the
+  top-2 headlines — ready to share.
 - **Auto-refresh** — all feeds refresh every 60 s; the header shows
   `updated HH:MM`, and `· STALE` if a refresh fails while old data stays up.
 - **Navigation** — tap to open, double-tap steps back (system exit dialog
@@ -114,14 +143,23 @@ blank screen.
 │  app (Vite + │   GET /api/markets      │  server/proxy.mjs  │
 │  TypeScript, │   GET /api/digest       │  zero-dependency   │
 │  Even Hub SDK│   GET /api/spot         │  Node (stdlib) +   │
-│              │◀─────────────────────── │  SWR response cache│
-└──────────────┘   GET /api/history      └──────┬─────────────┘
-  slim JSON                                     │ server-side fetch
+│              │   GET /api/perps        │  SWR response cache│
+│              │   POST /stt (mic PCM)   └──────┬─────────────┘
+└──────────────┘                                │ server-side fetch
                           ┌─────────────┬───────┴───────┬─────────────┐
                           ▼             ▼               ▼             ▼
                    Polymarket      Polymarket      CoinGecko    Telegram
-                   Gamma API       CLOB history    spot prices  public previews
-                   (crypto events) (24h trend)     (BTC/ETH)    (t.me/s HTML)
+                   Gamma API       CLOB history    spot (5 coins) public previews
+                   (crypto events) (24h trend)        + Hyperliquid perps API
+                                                │
+                                                ▼  POST /stt forwards raw PCM
+                                         ┌────────────────────┐
+                                         │  STT service       │
+                                         │  server/stt/       │
+                                         │  faster-whisper    │
+                                         │  LOCAL model —     │
+                                         │  no cloud, no key  │
+                                         └────────────────────┘
 ```
 
 **Why a proxy at all?** The G2 WebView may only call origins whitelisted in
@@ -165,9 +203,17 @@ primary, always-reproducible path, and it is what the demo video uses.
   and touches no funds.
 - **Polymarket CLOB public API** (`clob.polymarket.com`) — the
   `prices-history` endpoint behind the 24h trend; public, read-only.
-- **CoinGecko public API** (`api.coingecko.com`) — BTC/ETH spot + 24h
-  change, no key (Kraken's public ticker is the proxy's fallback;
-  Binance's public API is geo-blocked from our build machine and unused).
+- **CoinGecko public API** (`api.coingecko.com`) — spot + 24h change for
+  BTC, ETH, SOL, DOGE and XRP, no key (Kraken's public ticker is the
+  proxy's fallback; Binance's public API is geo-blocked from our build
+  machine and unused).
+- **Hyperliquid public API** (`api.hyperliquid.xyz`) — perpetual mark
+  prices, hourly funding rates and open interest for BTC/ETH/SOL;
+  public, read-only, no key.
+- **Speech-to-text runs locally** — the microphone's raw PCM is
+  transcribed by a faster-whisper model on the Glance server itself
+  (`server/stt/`). Audio goes from the glasses to our own backend and
+  nowhere else; there is no cloud ASR and no third-party key.
 - **Telegram public channel previews** (`t.me/s/<channel>`) — public web
   pages, no account, no Bot API token. Only channels with a genuinely
   public preview are used (verified: `whale_alert_io`, `cointelegraph`,
@@ -179,17 +225,46 @@ primary, always-reproducible path, and it is what the demo video uses.
   the app's local storage on the device; paper trading is simulated
   on-device and never touches a real order book.
 
-## An honest note on voice
+## Voice — what shipped, and exactly what is verified
 
-The app is **tap-first by design**, and we verified why rather than
-assuming: the Even Hub SDK exposes **raw PCM audio only — there is no
-speech-to-text in the SDK** — and in the Even Hub simulator the microphone
-cannot be opened at all (`audioControl(true)` returns `false`, zero audio
-frames arrive, and the simulator's automation API has no audio injection).
-Voice commands would need an external ASR service behind the proxy and
-real hardware to test; rather than fake a voice demo, Glance makes the
-tap flows fast enough that the answer is one or two taps away. The probe
-evidence is in `BUILDLOG.md` (Day 2) with a screenshot.
+Glance **does** take voice commands (Day 6): the SDK exposes raw PCM
+audio only — there is no speech-to-text in the SDK — so the app records
+through the SDK's audio API, POSTs the PCM to the Glance proxy, and a
+**local faster-whisper model** on the same server transcribes it. A
+deterministic parser maps the transcript to an intent, and the app
+executes it through the same actions as the taps. No cloud ASR, no API
+key, no third party hears the audio.
+
+The verification boundary, stated as precisely as our other test
+doubles:
+
+- **Verified end-to-end, in the simulator:** the whole pipeline
+  downstream of the microphone. Recorded spoken commands (TTS-voiced,
+  converted to the SDK's exact frame format — raw PCM, s16le, 16 kHz,
+  mono) were fed through the app's own code path (`src/voice.ts` →
+  proxy `POST /stt` → local Whisper → intent parser) by a dev-only
+  verification page that renders every state on the glasses display:
+  `app/docs/day6-voice-feeding.png`, `day6-voice-processing.png`,
+  `day6-voice-result.png` ("Watch bitcoin" → watch intent),
+  `day6-voice-result-price.png` ("Bitcoin price" → price intent).
+  The HTTP test suite (`app/server/stt/test_stt.py`) passes **7/7**
+  spoken commands with correct transcripts and intents at ~1–2 s each.
+  The app's own voice view renders its idle and listening states in
+  the simulator (`day6-voice-idle.png`).
+- **Not verified — real-microphone capture on hardware.** The Even Hub
+  simulator has no microphone: `audioControl(true)` returns `false`
+  and zero audio frames arrive (probed on Day 2, re-confirmed on
+  Day 6 — the app shows an honest "mic unavailable in this
+  environment" state there, `day6-voice-nomic.png`). The record step
+  uses only the documented SDK calls (`audioControl` +
+  `audioEvent.audioPcm`), but the first real capture happens on a
+  physical G2, and we say so rather than claim otherwise.
+- The verification page also caught a real bug the taps never could:
+  the `/stt` POST is CORS-preflighted (its content type is not
+  safelisted) and the proxy initially 404'd the preflight, which the
+  WebView reports as a bare "Load failed". The proxy now answers
+  preflights properly — on hardware this would have broken voice
+  exactly the same way.
 
 ## What existed before Nov 23 (event start)
 
@@ -200,10 +275,10 @@ evidence is in `BUILDLOG.md` (Day 2) with a screenshot.
   simulator).
 
 Everything else — the proxy, the feed selection and cleanup logic, the
-glasses UI (home / list / detail / brief / morning brief), the watchlist
-and its move alerts, the brief composers, the offline states, this README
-and the build log — was designed and built during the hackathon window
-(Nov 26–29). The full story, including the traps we hit (63-byte list-item
+glasses UI (home / list / detail / brief / morning brief / perps /
+voice), the watchlist and its move alerts, the brief composers, the
+local STT service, the offline states, this README and the build log —
+was designed and built during the hackathon window (Nov 26–29). The full story, including the traps we hit (63-byte list-item
 cap, cold-start-only page creation, a dedupe regex that ate prose, glyphs
 the G2 font silently drops), is in [`BUILDLOG.md`](BUILDLOG.md).
 
@@ -211,11 +286,11 @@ the G2 font silently drops), is in [`BUILDLOG.md`](BUILDLOG.md).
 
 | Rubric line | How Glance answers it |
 | --- | --- |
-| Usefulness on G2 (25%) | The highest-frequency crypto checks — spot, odds, whale/news wire — in one home glance, on the device you are already wearing; watch alerts mean the glasses speak first when a market you follow moves ≥3 pts. |
-| Read-and-write (20%) | Read: spot, both feeds, 24h trends, live. Write/act in seconds: one tap pins a market to a persistent watchlist; one tap opens/closes a persistent paper position marked to market; one tap composes a shareable one-line brief; one tap composes the full morning brief (spot + top markets + the wire). |
-| Technical execution (20%) | End-to-end on **real accounts-free live data**, not mocks: real Polymarket odds + CLOB price history, real CoinGecko spot, real Telegram posts from five channels, verified in the simulator at every step (see `app/docs/day2-*.png`, `app/docs/day4-*.png`, `app/docs/day5-*.png` and `BUILDLOG.md`). Zero-dependency proxy with a stale-while-revalidate cache; offline/STALE states tested by killing the proxy mid-flight; the watch-alert and paper-P&L paths exercised end-to-end against a local test double (documented in the log). Even Hub SDK 0.0.16, adopted only after a full scratch re-verification. The installable `app/glance.ehpk` ships in the repo. |
-| UX for display/voice (15%) | Designed for 576×288 monochrome: price-first rows within the firmware's 63-byte cap, one fact per row, double-tap back, header clock + STALE honesty; every glyph used was verified against the G2 font (block-char sparklines were prototyped, found missing from the font, and replaced with a textual trend). Voice: honestly scoped out (see the voice note) instead of faked. |
-| Business potential + safety (20%) | A plausible companion for any odds/news source (the feed layer is source-agnostic); read-only by construction — no keys, no custody, no trading, no user funds at risk. |
+| Usefulness (30%) | The highest-frequency crypto checks — five-coin spot, odds, perps, whale/news wire — in one home glance, on the device you are already wearing; watch alerts mean the glasses speak first when a market you follow moves ≥3 pts. |
+| Read-and-write (25%) | Read: spot, both feeds, perps, 24h trends, live. Write/act in seconds: one tap pins a market to a persistent watchlist; one tap opens/closes a persistent paper position marked to market; one tap composes a shareable one-line brief or the full morning brief; and **voice is a write channel too** — "watch bitcoin" performs the watch, hands-free. |
+| Technical execution (20%) | End-to-end on **real accounts-free live data**, not mocks: real Polymarket odds + CLOB price history, real CoinGecko spot, real Hyperliquid perps, real Telegram posts from five channels, and a **local Whisper STT service** (faster-whisper, self-hosted, no key) behind the proxy — verified in the simulator at every step (see `app/docs/day2-*.png` … `app/docs/day6-*.png` and `BUILDLOG.md`). Zero-dependency proxy with a stale-while-revalidate cache; offline/STALE states tested by killing the proxy mid-flight; the watch-alert, paper-P&L and voice paths exercised end-to-end against documented test doubles. Even Hub SDK 0.0.16, adopted only after a full scratch re-verification. The installable `app/glance.ehpk` ships in the repo. |
+| UX for display and voice (15%) | Designed for 576×288 monochrome: price-first rows within the firmware's 63-byte cap, one fact per row, double-tap back, header clock + STALE honesty; every glyph used was verified against the G2 font (block-char sparklines were prototyped, found missing from the font, and replaced with a textual trend). Voice: a real LISTEN → speak → STOP flow with visible listening/processing/result states and an honest unavailable state where no mic exists — the pipeline is verified with recorded speech through the exact code path (see the voice note). |
+| Business/safety (10%) | A plausible companion for any odds/news source (the feed layer is source-agnostic); read-only by construction — no keys, no custody, no trading, no user funds at risk; voice audio never leaves our own backend and is never sent to a cloud ASR. |
 
 ## Repository layout
 
@@ -228,7 +303,9 @@ the G2 font silently drops), is in [`BUILDLOG.md`](BUILDLOG.md).
     ├── index.html       WebView host page
     ├── package.json     scripts: dev / build / pack / simulate / proxy
     ├── server/proxy.mjs zero-dependency backend proxy
-    ├── src/             config.ts · feeds.ts (data + formatting) · main.ts (UI state machine)
+    ├── server/stt/      local STT service (faster-whisper) + HTTP test suite + spoken-command samples
+    ├── src/             config.ts · feeds.ts (data + formatting) · main.ts (UI state machine) · voice.ts (voice client)
+    ├── voice-test.html  dev-only voice-pipeline verification page (not in the shipped build)
     └── docs/            simulator screenshots from each build day
 ```
 

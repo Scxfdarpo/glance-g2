@@ -24,7 +24,31 @@ export interface SpotQuote {
 export interface Spot {
   btc: SpotQuote
   eth: SpotQuote
+  sol: SpotQuote
+  doge: SpotQuote
+  xrp: SpotQuote
   source: string
+}
+
+/** Spot quote by coin symbol, for voice answers ("bitcoin price"). */
+export function spotQuote(spot: Spot, coin: string): SpotQuote | null {
+  switch (coin) {
+    case 'BTC': return spot.btc
+    case 'ETH': return spot.eth
+    case 'SOL': return spot.sol
+    case 'DOGE': return spot.doge
+    case 'XRP': return spot.xrp
+    default: return null
+  }
+}
+
+export interface Perp {
+  coin: string // BTC / ETH / SOL
+  markPx: number
+  funding: number // hourly rate as a fraction (0.0001 = 0.01%/h)
+  openInterest: number // coin units
+  openInterestUsd: number
+  dayChange: number // percent, signed
 }
 
 export interface HistoryPoint {
@@ -157,29 +181,84 @@ export async function fetchDigest(limit: number): Promise<Post[]> {
   return data.posts
 }
 
-/** BTC + ETH spot via the proxy; CoinGecko direct as the fallback. */
+/** Five-coin spot via the proxy; CoinGecko direct as the fallback. */
 export async function fetchSpot(): Promise<Spot> {
   try {
     return await getJson<Spot>('/api/spot')
   } catch (proxyError) {
     try {
       const res = await fetchWithTimeout(
-        'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum' +
+        'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana,dogecoin,ripple' +
           '&vs_currencies=usd&include_24hr_change=true',
       )
       if (!res.ok) throw new Error(`coingecko ${res.status}`)
-      const d = (await res.json()) as {
-        bitcoin?: { usd?: number; usd_24h_change?: number }
-        ethereum?: { usd?: number; usd_24h_change?: number }
-      }
+      const d = (await res.json()) as Record<string, { usd?: number; usd_24h_change?: number } | undefined>
+      const pick = (id: string): SpotQuote => ({
+        price: d[id]?.usd ?? 0,
+        change24h: d[id]?.usd_24h_change ?? 0,
+      })
       return {
-        btc: { price: d.bitcoin?.usd ?? 0, change24h: d.bitcoin?.usd_24h_change ?? 0 },
-        eth: { price: d.ethereum?.usd ?? 0, change24h: d.ethereum?.usd_24h_change ?? 0 },
+        btc: pick('bitcoin'),
+        eth: pick('ethereum'),
+        sol: pick('solana'),
+        doge: pick('dogecoin'),
+        xrp: pick('ripple'),
         source: 'coingecko-direct',
       }
     } catch {
       throw proxyError
     }
+  }
+}
+
+/** BTC/ETH/SOL perpetuals (Hyperliquid) via the proxy; the public info
+ *  API direct as the fallback (same slimming as the proxy). */
+export async function fetchPerps(): Promise<Perp[]> {
+  try {
+    const data = await getJson<{ perps: Perp[] }>('/api/perps')
+    return data.perps
+  } catch (proxyError) {
+    return await fetchPerpsDirect(proxyError)
+  }
+}
+
+async function fetchPerpsDirect(proxyError: unknown): Promise<Perp[]> {
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), 8000)
+  try {
+    const res = await fetch('https://api.hyperliquid.xyz/info', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'metaAndAssetCtxs' }),
+      signal: ctrl.signal,
+    })
+    if (!res.ok) throw new Error(`hyperliquid ${res.status}`)
+    const [meta, ctxs] = (await res.json()) as [
+      { universe: { name: string; isDelisted?: boolean }[] },
+      Record<string, string>[],
+    ]
+    const wanted = ['BTC', 'ETH', 'SOL']
+    const out: Perp[] = []
+    meta.universe.forEach((asset, i) => {
+      if (!wanted.includes(asset.name) || asset.isDelisted) return
+      const c = ctxs[i] ?? {}
+      const mark = Number(c.markPx) || 0
+      const oi = Number(c.openInterest) || 0
+      const prev = Number(c.prevDayPx) || 0
+      out.push({
+        coin: asset.name,
+        markPx: mark,
+        funding: Number(c.funding) || 0,
+        openInterest: oi,
+        openInterestUsd: oi * mark,
+        dayChange: prev ? (mark / prev - 1) * 100 : 0,
+      })
+    })
+    return out.sort((a, b) => wanted.indexOf(a.coin) - wanted.indexOf(b.coin))
+  } catch {
+    throw proxyError
+  } finally {
+    clearTimeout(timer)
   }
 }
 
@@ -203,6 +282,7 @@ export async function fetchHistory(tokenId: string): Promise<HistoryPoint[]> {
 
 export function fmtUsd(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return '$0'
+  if (n >= 1_000_000_000) return `$${(n / 1_000_000_000).toFixed(2).replace(/\.?0+$/, '')}B`
   if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
   if (n >= 1_000) return `$${Math.round(n / 1_000)}K`
   return `$${Math.round(n)}`
@@ -371,6 +451,54 @@ export function spotLine(spot: Spot): string {
   )
 }
 
+/** Compact price for the second spot row, where three coins share
+ *  60 bytes: "$70.9" / "$0.941" / "$0.057" — glance precision, honestly
+ *  rounded; the full precision lives one tap away on the wire. */
+export function fmtSpotCompact(n: number): string {
+  if (!(n > 0)) return '$—'
+  if (n >= 1000) return fmtSpotPrice(n)
+  if (n >= 10) return `$${n.toFixed(1)}`
+  if (n >= 1) return `$${n.toFixed(2)}`
+  return `$${n.toFixed(3)}`
+}
+
+/** Second home spot row: "SOL $70.9▼3.5% · DOGE $0.057▼2.7% · XRP $0.941▼4.0%".
+ *  No space before the change arrow: with three coins, three prices and
+ *  three changes, the spaced form lands at ~61 bytes and the 63-byte
+ *  firmware cap eats the last coin's change (seen in the Day-6 first
+ *  framebuffer pass). This form is ~58 bytes — everything survives. */
+export function spotLine2(spot: Spot): string {
+  return clampItem(
+    `SOL ${fmtSpotCompact(spot.sol.price)}${changeStr(spot.sol.change24h)} · ` +
+      `DOGE ${fmtSpotCompact(spot.doge.price)}${changeStr(spot.doge.change24h)} · ` +
+      `XRP ${fmtSpotCompact(spot.xrp.price)}${changeStr(spot.xrp.change24h)}`,
+  )
+}
+
+// --- Hyperliquid perps (panel body) ------------------------------------------------
+
+/** Signed hourly funding as text: "+0.0059%/h" / "-0.0001%/h". */
+export function fundingStr(funding: number): string {
+  const pct = funding * 100
+  const sign = pct > 0 ? '+' : pct < 0 ? '-' : ''
+  return `${sign}${Math.abs(pct).toFixed(4)}%/h`
+}
+
+/** Perps panel body — one coin per two lines, sized for the text box. */
+export function perpLines(perps: Perp[]): string {
+  if (!perps.length) return 'Perps unavailable — Hyperliquid did not answer.\nTap back and retry in a moment.'
+  const lines: string[] = []
+  for (const p of perps) {
+    lines.push(
+      `${p.coin} perp ${p.markPx >= 100 ? fmtSpotPrice(p.markPx) : fmtSpotCompact(p.markPx)} ${changeStr(p.dayChange)} today`,
+      `funding ${fundingStr(p.funding)} · open interest ${fmtUsd(p.openInterestUsd)}`,
+      '',
+    )
+  }
+  lines.push('— Hyperliquid perpetuals, live. Funding is hourly.')
+  return lines.join('\n')
+}
+
 // --- Price-history trend (market detail) ------------------------------------------
 
 /** "24h: 30↑35↑44↓22↓16↓13" — six samples across the day, one line, each
@@ -466,6 +594,11 @@ export function morningBrief(spot: Spot | null, markets: Market[], posts: Post[]
     lines.push(
       `BTC ${fmtSpotPrice(spot.btc.price)} ${changeStr(spot.btc.change24h)} · ` +
         `ETH ${fmtSpotPrice(spot.eth.price)} ${changeStr(spot.eth.change24h)}`,
+    )
+    lines.push(
+      `SOL ${fmtSpotCompact(spot.sol.price)} ${changeStr(spot.sol.change24h)} · ` +
+        `DOGE ${fmtSpotCompact(spot.doge.price)} ${changeStr(spot.doge.change24h)} · ` +
+        `XRP ${fmtSpotCompact(spot.xrp.price)} ${changeStr(spot.xrp.change24h)}`,
     )
   }
   lines.push('', 'Top markets:')

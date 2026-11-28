@@ -1,6 +1,10 @@
 # Dependencies (reinstall with `npm install` in app/)
 node_modules/
 
+# Python venv for the local STT service (recreate: python3 -m venv
+# app/server/stt/.venv && app/server/stt/.venv/bin/pip install faster-whisper)
+.venv/
+
 # Build outputs
 app/dist/
 *.ehpk

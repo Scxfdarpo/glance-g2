@@ -13,6 +13,13 @@
 //   BRIEF   the item rewritten as one shareable line + back actions.
 //   MORNING the whole morning on one screen: spot, top-3 markets,
 //           top-2 headlines — composed on-device, ready to share.
+//   PERPS   BTC/ETH/SOL perpetuals from Hyperliquid: mark price,
+//           hourly funding, open interest (Day 6).
+//   VOICE   tap LISTEN, speak a command, tap STOP — the mic PCM goes
+//           to the Glance server, where a local Whisper model (no
+//           cloud ASR) transcribes it and the parsed intent runs the
+//           same actions as the taps (Day 6). HOME also carries a
+//           five-coin spot glance (BTC/ETH + SOL/DOGE/XRP rows).
 //
 // Read-and-write: the watchlist persists in localStorage and pins watched
 // markets to the top with a ★; watched prices are remembered between
@@ -37,12 +44,14 @@ import {
   RebuildPageContainer,
   TextContainerUpgrade,
   OsEventTypeList,
+  AudioInputSource,
 } from '@evenrealities/even_hub_sdk'
 import { MARKET_ROWS, DIGEST_ROWS } from './config'
 import {
   fetchMarkets,
   fetchDigest,
   fetchSpot,
+  fetchPerps,
   fetchHistory,
   marketRow,
   postRow,
@@ -51,6 +60,11 @@ import {
   marketBrief,
   postBrief,
   spotLine,
+  spotLine2,
+  spotQuote,
+  fmtSpotPrice,
+  changeStr,
+  perpLines,
   deltaStr,
   watchDeltaPts,
   trendStrip,
@@ -63,14 +77,21 @@ import {
   type Market,
   type Post,
   type Spot,
+  type Perp,
   type HistoryPoint,
   type PaperPos,
 } from './feeds'
+import {
+  transcribePcm,
+  actionLabel,
+  VOICE_EXAMPLES,
+  type SttResult,
+} from './voice'
 
 // ---------------------------------------------------------------- state
 
 type FeedName = 'markets' | 'digest'
-type View = 'home' | 'list' | 'detail' | 'brief' | 'morning'
+type View = 'home' | 'list' | 'detail' | 'brief' | 'morning' | 'perps' | 'voice'
 
 const state = {
   feed: 'markets' as FeedName,
@@ -78,6 +99,7 @@ const state = {
   markets: [] as Market[],
   posts: [] as Post[],
   spot: null as Spot | null,
+  perps: [] as Perp[],
   selected: 0, // index into the current feed's items (detail/brief target)
   detailFrom: 'list' as 'home' | 'list', // where DETAIL was opened from
   updatedAt: null as Date | null,
@@ -147,6 +169,28 @@ function savePaper() {
   } catch { /* storage unavailable */ }
 }
 
+// Voice commands (Day 6) — the app accumulates the SDK's raw PCM frames
+// while listening and POSTs them to the proxy's /stt endpoint on STOP;
+// a local Whisper model on the Glance server transcribes them (no cloud
+// ASR, no API key) and the parsed intent is executed through the same
+// actions the taps use. See src/voice.ts and BUILDLOG Day 6 for exactly
+// what is verified and what is hardware-only.
+type VoicePhase = 'idle' | 'listening' | 'processing' | 'result' | 'error'
+const voice = {
+  phase: 'idle' as VoicePhase,
+  chunks: [] as Uint8Array[],
+  bytes: 0,
+  startedAt: 0,
+  resultText: '',
+  errorText: '',
+  tick: null as ReturnType<typeof setInterval> | null,
+  navTimer: null as ReturnType<typeof setTimeout> | null,
+}
+function clearVoiceTimers() {
+  if (voice.tick) { clearInterval(voice.tick); voice.tick = null }
+  if (voice.navTimer) { clearTimeout(voice.navTimer); voice.navTimer = null }
+}
+
 /** The largest current watch alert, if any. */
 function topAlert(): { slug: string; delta: number } | null {
   let best: { slug: string; delta: number } | null = null
@@ -173,7 +217,9 @@ function currentPost(): Post | undefined {
 
 const marketSig = (ms: Market[]) => ms.map((m) => `${m.slug}:${m.prices[0]}`).join('|')
 const postSig = (ps: Post[]) => ps.map((p) => p.id).join('|')
-const spotSig = (s: Spot | null) => (s ? `${s.btc.price}:${s.eth.price}` : '')
+const spotSig = (s: Spot | null) =>
+  s ? `${s.btc.price}:${s.eth.price}:${s.sol.price}:${s.doge.price}:${s.xrp.price}` : ''
+const perpsSig = (ps: Perp[]) => ps.map((p) => `${p.coin}:${p.markPx}:${p.funding}`).join('|')
 const alertSig = () =>
   [...alerts.entries()].map(([k, v]) => `${k}:${v.toFixed(1)}`).sort().join('|')
 
@@ -195,10 +241,11 @@ function updateAlerts(fresh: Market[]) {
 }
 
 async function loadFeeds(): Promise<boolean> {
-  const [m, p, s] = await Promise.allSettled([
+  const [m, p, s, pp] = await Promise.allSettled([
     fetchMarkets(MARKET_ROWS),
     fetchDigest(DIGEST_ROWS),
     fetchSpot(),
+    fetchPerps(),
   ])
   let changed = false
   let anyOk = false
@@ -216,6 +263,10 @@ async function loadFeeds(): Promise<boolean> {
   if (s.status === 'fulfilled') {
     anyOk = true
     if (spotSig(s.value) !== spotSig(state.spot)) { state.spot = s.value; changed = true }
+  }
+  if (pp.status === 'fulfilled') {
+    anyOk = true
+    if (perpsSig(pp.value) !== perpsSig(state.perps)) { state.perps = pp.value; changed = true }
   }
   state.stale = !anyOk
   if (anyOk) {
@@ -241,6 +292,8 @@ function headerContent(): string {
     case 'detail': return state.feed === 'markets' ? 'GLANCE · MARKET' : 'GLANCE · POST'
     case 'brief': return 'GLANCE · BRIEF — ready to share'
     case 'morning': return 'GLANCE · MORNING BRIEF'
+    case 'perps': return 'GLANCE · PERPS — HYPERLIQUID'
+    case 'voice': return 'GLANCE · VOICE'
     default:
       return state.feed === 'markets'
         ? `GLANCE · MARKETS${when}${stale}`
@@ -304,6 +357,10 @@ function homeRows(): HomeRow[] {
     label: state.spot ? spotLine(state.spot) : 'BTC · ETH — spot loading…',
     go: () => { state.feed = 'markets'; state.view = 'list'; void render() },
   })
+  rows.push({
+    label: state.spot ? spotLine2(state.spot) : 'SOL · DOGE · XRP — spot loading…',
+    go: () => { state.feed = 'markets'; state.view = 'list'; void render() },
+  })
   const alert = topAlert()
   if (alert) {
     const idx = orderedMarkets().findIndex((m) => m.slug === alert.slug)
@@ -340,12 +397,20 @@ function homeRows(): HomeRow[] {
     rows.push({ label: postRow(latest), go: () => openPost(0, 'home') })
   }
   rows.push({
+    label: 'Voice — tap, speak, done',
+    go: () => { state.view = 'voice'; void render() },
+  })
+  rows.push({
     label: '>> MARKETS — all odds',
     go: () => { state.feed = 'markets'; state.view = 'list'; void render() },
   })
   rows.push({
     label: '>> DIGEST — the wire',
     go: () => { state.feed = 'digest'; state.view = 'list'; void render() },
+  })
+  rows.push({
+    label: '>> PERPS — Hyperliquid futures',
+    go: () => { state.view = 'perps'; void render() },
   })
   rows.push({
     label: 'Morning brief — tap to compose',
@@ -467,6 +532,40 @@ function briefBody(): string {
   return line ? `${line}\n\n— composed by Glance from live data.` : 'Nothing to brief — back to the list.'
 }
 
+function voiceBody(): string {
+  switch (voice.phase) {
+    case 'listening': {
+      const secs = Math.max(0, Math.round((Date.now() - voice.startedAt) / 1000))
+      return (
+        `Listening… ${secs}s\n` +
+        'Speak now — tap STOP when done.\n\n' +
+        'Try: "bitcoin price",\n"show markets", "watch bitcoin",\n"morning brief", "latest news"'
+      )
+    }
+    case 'processing':
+      return (
+        'Heard you — transcribing…\n\n' +
+        'A local Whisper model on the\nGlance server does the listening.\nNo cloud ASR, no API key.'
+      )
+    case 'result':
+      return voice.resultText
+    case 'error':
+      return voice.errorText
+    default:
+      return (
+        'Tap LISTEN, speak, tap STOP:\n' +
+        VOICE_EXAMPLES.map((e) => `· ${e}`).join('\n')
+      )
+  }
+}
+
+function voiceActionRows(): string[] {
+  if (voice.phase === 'listening') return ['STOP — send it', '← Back to home']
+  if (voice.phase === 'processing') return ['… working …', '← Back to home']
+  if (voice.phase === 'result') return ['LISTEN — say another', '← Back to home']
+  return ['LISTEN — tap to talk', '← Back to home']
+}
+
 async function render() {
   // If the detail target vanished in a refresh, fall back to the list.
   if (state.view === 'detail' || state.view === 'brief') {
@@ -502,6 +601,16 @@ async function render() {
       ],
       listObject: [list(2, 208, 80, ['← Back to home'])],
     }
+  } else if (state.view === 'perps') {
+    containers = {
+      textObject: [header, text(3, 'body', 40, 168, perpLines(state.perps))],
+      listObject: [list(2, 208, 80, ['← Back to home'])],
+    }
+  } else if (state.view === 'voice') {
+    containers = {
+      textObject: [header, text(3, 'body', 40, 168, voiceBody())],
+      listObject: [list(2, 208, 80, voiceActionRows())],
+    }
   } else {
     containers = {
       textObject: [header, text(3, 'body', 40, 168, briefBody())],
@@ -529,6 +638,143 @@ async function refreshHeader() {
   )
 }
 
+// ---------------------------------------------------------------- voice control
+
+async function startListening() {
+  clearVoiceTimers()
+  voice.chunks = []
+  voice.bytes = 0
+  const ok = await bridge.audioControl(true, AudioInputSource.Glasses).catch(() => false)
+  if (!ok) {
+    // The honest dead end: the simulator refuses the mic (verified since
+    // Day 2 — audioControl returns false, zero frames). On hardware this
+    // same tap starts capture. Nothing here pretends otherwise.
+    voice.phase = 'error'
+    voice.errorText =
+      'Mic unavailable in this\nenvironment — the simulator\nhas no microphone.\n\n' +
+      'On the glasses this tap starts\ncapture; commands are then\ntranscribed locally by the\nGlance server (Whisper, no cloud).'
+    if (state.view === 'voice') void render()
+    return
+  }
+  voice.phase = 'listening'
+  voice.startedAt = Date.now()
+  voice.tick = setInterval(() => {
+    if (voice.phase !== 'listening') return
+    if (Date.now() - voice.startedAt > 12_000) { void stopListening(); return }
+    void bridge.textContainerUpgrade(
+      new TextContainerUpgrade({ containerID: 3, containerName: 'body', content: voiceBody() }),
+    )
+  }, 500)
+  void render()
+}
+
+async function stopListening() {
+  clearVoiceTimers()
+  await bridge.audioControl(false).catch(() => false)
+  if (voice.bytes < 8000) {
+    // < 0.25 s of audio — a tap, not a command.
+    voice.phase = 'error'
+    voice.errorText =
+      'No audio captured.\n\nOn the glasses, hold the\ncommand for a full breath:\n"bitcoin price" takes a second.'
+    if (state.view === 'voice') void render()
+    return
+  }
+  voice.phase = 'processing'
+  void render()
+  const pcm = new Uint8Array(voice.bytes)
+  let off = 0
+  for (const chunk of voice.chunks) { pcm.set(chunk, off); off += chunk.length }
+  voice.chunks = []
+  try {
+    const result = await transcribePcm(pcm)
+    applyVoiceResult(result)
+  } catch {
+    voice.phase = 'error'
+    voice.errorText =
+      'Transcription failed — the\nGlance STT service did not\nanswer. Start it with\n"npm run stt" next to the proxy.'
+    if (state.view === 'voice') void render()
+  }
+}
+
+function cancelVoice() {
+  clearVoiceTimers()
+  if (voice.phase === 'listening') void bridge.audioControl(false).catch(() => false)
+  voice.phase = 'idle'
+  voice.chunks = []
+  voice.bytes = 0
+}
+
+/** Execute a parsed voice intent through the same actions the taps use. */
+function applyVoiceResult(r: SttResult) {
+  voice.phase = 'result'
+  const heard = `You said: "${r.transcript}"`
+  const go = (fn: () => void) => {
+    voice.resultText = `${heard}\n→ ${actionLabel(r)}…`
+    voice.navTimer = setTimeout(() => {
+      voice.phase = 'idle'
+      fn()
+    }, 1300)
+    void render()
+  }
+  switch (r.intent) {
+    case 'price': {
+      const coin = r.coin ?? 'BTC'
+      const q = state.spot ? spotQuote(state.spot, coin) : null
+      voice.resultText = q
+        ? `${heard}\n\n${coin} ${fmtSpotPrice(q.price)} ${changeStr(q.change24h)} in 24h\n— live spot, just now.`
+        : `${heard}\n\nSpot is still loading —\nask again in a moment.`
+      void render()
+      return
+    }
+    case 'markets':
+      go(() => { state.feed = 'markets'; state.view = 'list'; void render() })
+      return
+    case 'top_market':
+      go(() => openMarket(0, 'home'))
+      return
+    case 'digest':
+      go(() => { state.feed = 'digest'; state.view = 'list'; void render() })
+      return
+    case 'brief':
+      go(() => { state.view = 'morning'; void render() })
+      return
+    case 'perps':
+      go(() => { state.view = 'perps'; void render() })
+      return
+    case 'home':
+      go(() => { state.view = 'home'; void render() })
+      return
+    case 'watch': {
+      const q = (r.query || '').toLowerCase()
+      const idx = q
+        ? orderedMarkets().findIndex(
+            (m) => m.question.toLowerCase().includes(q) || m.slug.toLowerCase().includes(q),
+          )
+        : -1
+      if (idx >= 0) {
+        const m = orderedMarkets()[idx]
+        if (!watch.has(m.slug)) {
+          watch.add(m.slug)
+          const now = Number(m.prices?.[0])
+          if (Number.isFinite(now)) lastPrices.set(m.slug, now)
+          saveWatch()
+          savePrices()
+        }
+        go(() => openMarket(idx, 'home'))
+      } else {
+        voice.resultText =
+          `${heard}\n\nNo live market matches\n"${r.query}" right now.\nTry "watch bitcoin".`
+        void render()
+      }
+      return
+    }
+    default:
+      voice.resultText =
+        `${heard}\n\nI don't know that one yet.\nTry: "bitcoin price", "markets",\n"brief", "news", "perps".`
+      void render()
+  }
+}
+
 // ---------------------------------------------------------------- actions
 
 function onListClick(idx: number) {
@@ -539,6 +785,22 @@ function onListClick(idx: number) {
   if (state.view === 'morning') {
     state.view = 'home'
     void render()
+    return
+  }
+  if (state.view === 'perps') {
+    state.view = 'home'
+    void render()
+    return
+  }
+  if (state.view === 'voice') {
+    if (idx === 1) {
+      cancelVoice()
+      state.view = 'home'
+      void render()
+      return
+    }
+    if (voice.phase === 'listening') void stopListening()
+    else if (voice.phase !== 'processing') void startListening()
     return
   }
   if (state.view === 'list') {
@@ -616,6 +878,21 @@ function eventTypeOf(envelope?: Envelope): OsEventTypeList | null {
 }
 
 const unsubscribe = bridge.onEvenHubEvent((event) => {
+  // Microphone frames arrive as audioEvent — accumulate them verbatim
+  // while listening; they are concatenated and POSTed on STOP.
+  if (event.audioEvent) {
+    if (voice.phase === 'listening') {
+      const pcm = event.audioEvent.audioPcm
+      if (pcm && pcm.length) {
+        const bytes =
+          pcm instanceof Uint8Array ? pcm : Uint8Array.from(pcm as unknown as ArrayLike<number>)
+        voice.chunks.push(bytes)
+        voice.bytes += bytes.length
+      }
+    }
+    return
+  }
+
   const sysType = eventTypeOf(event.sysEvent)
   const textType = eventTypeOf(event.textEvent)
   const listType = eventTypeOf(event.listEvent)
@@ -625,6 +902,7 @@ const unsubscribe = bridge.onEvenHubEvent((event) => {
     textType === OsEventTypeList.DOUBLE_CLICK_EVENT ||
     listType === OsEventTypeList.DOUBLE_CLICK_EVENT
   ) {
+    if (voice.phase === 'listening' || voice.phase === 'result') cancelVoice()
     if (state.view === 'home') {
       bridge.shutDownPageContainer(1) // mode 1 = system exit dialog (required on root page)
     } else if (state.view === 'brief') {

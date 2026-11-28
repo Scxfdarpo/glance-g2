@@ -16,15 +16,30 @@
 //          &channels=a,b            Telegram previews (t.me/s/<channel>),
 //                                   deduped, newest first, with timestamps.
 //                                   `channels` defaults to the verified list.
-//   GET /api/spot                   BTC + ETH spot price + 24h change
-//                                   (CoinGecko public API, Kraken fallback).
+//   GET /api/spot                   BTC/ETH/SOL/DOGE/XRP spot price + 24h
+//                                   change (CoinGecko public API, Kraken
+//                                   fallback).
+//   GET /api/perps                  BTC/ETH/SOL perpetuals from the public
+//                                   Hyperliquid API: mark price, hourly
+//                                   funding rate, open interest.
 //   GET /api/history?token=<id>     24h hourly Yes-price history for one
 //                                   market from the Polymarket CLOB API.
+//   POST /stt                       Raw microphone PCM (s16le, 16 kHz,
+//                                   mono) -> forwarded to the local STT
+//                                   service (server/stt/stt_server.py,
+//                                   faster-whisper on this machine — no
+//                                   API key, no cloud ASR). Returns
+//                                   { transcript, intent, coin, query }.
 //   GET /health                     { ok: true }
 //
 // Run:  node server/proxy.mjs        (PORT env, default 8787)
 
 import { createServer } from 'node:http'
+import { readFile } from 'node:fs/promises'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const SAMPLES_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'stt', 'samples')
 
 const PORT = process.env.PORT || 8787
 const GAMMA = 'https://gamma-api.polymarket.com'
@@ -171,27 +186,38 @@ async function fetchDigest(channels, limit) {
   return [...byId.values()].sort((a, b) => b.ts - a.ts).slice(0, limit)
 }
 
-// --- Spot prices (BTC / ETH) ---------------------------------------------------
+// --- Spot prices (BTC / ETH / SOL / DOGE / XRP) --------------------------------
 // CoinGecko's public simple/price is the primary source (clean USD + 24h
 // change in one call, no key). Kraken's public Ticker is the fallback —
 // its "open today" vs last-trade gives an honest 24h change. Binance's
 // public ticker is geo-blocked from our build VM, so it is not used.
 
+const SPOT_COINS = [
+  ['btc', 'bitcoin', 'XXBTZUSD'],
+  ['eth', 'ethereum', 'XETHZUSD'],
+  ['sol', 'solana', 'SOLUSD'],
+  ['doge', 'dogecoin', 'XDGUSD'],
+  ['xrp', 'ripple', 'XXRPZUSD'],
+]
+
 async function fetchSpot() {
   try {
+    const ids = SPOT_COINS.map((c) => c[1]).join(',')
     const url =
-      'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum' +
+      `https://api.coingecko.com/api/v3/simple/price?ids=${ids}` +
       '&vs_currencies=usd&include_24hr_change=true'
-    const res = await fetch(url, { headers: { 'user-agent': 'glance-proxy/0.3' } })
+    const res = await fetch(url, { headers: { 'user-agent': 'glance-proxy/0.4' } })
     if (!res.ok) throw new Error(`coingecko ${res.status}`)
     const d = await res.json()
-    return {
-      btc: { price: num(d.bitcoin && d.bitcoin.usd), change24h: num(d.bitcoin && d.bitcoin.usd_24h_change) },
-      eth: { price: num(d.ethereum && d.ethereum.usd), change24h: num(d.ethereum && d.ethereum.usd_24h_change) },
-      source: 'coingecko',
+    const out = { source: 'coingecko' }
+    for (const [key, id] of SPOT_COINS) {
+      const q = d[id] || {}
+      out[key] = { price: num(q.usd), change24h: num(q.usd_24h_change) }
     }
+    return out
   } catch {
-    const res = await fetch('https://api.kraken.com/0/public/Ticker?pair=XBTUSD,ETHUSD')
+    const pairs = SPOT_COINS.map((c) => c[2]).join(',')
+    const res = await fetch(`https://api.kraken.com/0/public/Ticker?pair=${pairs}`)
     if (!res.ok) throw new Error(`kraken ${res.status}`)
     const d = await res.json()
     const pick = (k) => {
@@ -201,8 +227,44 @@ async function fetchSpot() {
       const open = num(t.o)
       return { price: last, change24h: open ? ((last - open) / open) * 100 : 0 }
     }
-    return { btc: pick('XXBTZUSD'), eth: pick('XETHZUSD'), source: 'kraken' }
+    const out = { source: 'kraken' }
+    for (const [key, , krakenKey] of SPOT_COINS) out[key] = pick(krakenKey)
+    return out
   }
+}
+
+// --- Hyperliquid perpetuals (BTC / ETH / SOL) ------------------------------------
+// Public info API, no key: one metaAndAssetCtxs call returns the universe
+// plus per-asset contexts (mark price, hourly funding, open interest in
+// coin units). We slim it to the three majors the glance shows.
+
+const PERP_COINS = ['BTC', 'ETH', 'SOL']
+
+async function fetchPerps() {
+  const res = await fetch('https://api.hyperliquid.xyz/info', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'user-agent': 'glance-proxy/0.4' },
+    body: JSON.stringify({ type: 'metaAndAssetCtxs' }),
+  })
+  if (!res.ok) throw new Error(`hyperliquid ${res.status}`)
+  const [meta, ctxs] = await res.json()
+  const perps = []
+  ;(meta.universe || []).forEach((asset, i) => {
+    if (!PERP_COINS.includes(asset.name) || asset.isDelisted) return
+    const c = ctxs[i] || {}
+    const mark = num(c.markPx)
+    const oiCoins = num(c.openInterest)
+    perps.push({
+      coin: asset.name,
+      markPx: mark,
+      funding: num(c.funding), // hourly rate as a fraction (0.0001 = 0.01%/h)
+      openInterest: oiCoins,
+      openInterestUsd: oiCoins * mark,
+      dayChange: num(c.prevDayPx) ? (mark / num(c.prevDayPx) - 1) * 100 : 0,
+    })
+  })
+  perps.sort((a, b) => PERP_COINS.indexOf(a.coin) - PERP_COINS.indexOf(b.coin))
+  return { perps, source: 'hyperliquid' }
 }
 
 // --- Price history (one market's Yes token, 24h hourly) ------------------------
@@ -245,10 +307,78 @@ async function cached(key, ttlMs, fetcher) {
 
 // --- HTTP server ---------------------------------------------------------------
 
+// --- Speech-to-text forwarding ---------------------------------------------------
+// The proxy itself stays zero-dependency: transcription lives in the
+// local STT service (server/stt/stt_server.py, faster-whisper, port
+// 8788). We forward the raw PCM body untouched — the bytes the glasses
+// accumulated from the SDK's audioEvent frames are the bytes the model
+// hears. If the STT service is down, /stt answers 502 and the app shows
+// an honest error; nothing is ever faked.
+
+const STT_URL = process.env.GLANCE_STT_URL || 'http://127.0.0.1:8788/stt'
+
+async function forwardStt(req, res) {
+  const chunks = []
+  let size = 0
+  for await (const chunk of req) {
+    size += chunk.length
+    if (size > 16000 * 2 * 20) return json(res, 413, { error: 'audio too long' })
+    chunks.push(chunk)
+  }
+  const upstream = await fetch(STT_URL, {
+    method: 'POST',
+    headers: { 'content-type': 'application/octet-stream' },
+    body: Buffer.concat(chunks),
+  })
+  const body = await upstream.text()
+  res.writeHead(upstream.status, {
+    'content-type': 'application/json; charset=utf-8',
+    'access-control-allow-origin': '*',
+    'cache-control': 'no-store',
+  })
+  return res.end(body)
+}
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`)
   try {
+    if (req.method === 'OPTIONS') {
+      // CORS preflight. The /stt POST carries content-type
+      // application/octet-stream, which is NOT a CORS-safelisted type,
+      // so the WebView preflights it — a 404 here makes the browser
+      // reject the real request with a bare "Load failed" (found by
+      // the Day-6 voice verification page; GETs never preflight,
+      // which is why every other endpoint worked without this).
+      res.writeHead(204, {
+        'access-control-allow-origin': '*',
+        'access-control-allow-methods': 'GET, POST, OPTIONS',
+        'access-control-allow-headers': 'content-type',
+        'access-control-max-age': '86400',
+      })
+      return res.end()
+    }
     if (url.pathname === '/health') return json(res, 200, { ok: true })
+    if (url.pathname === '/stt' && req.method === 'POST') return await forwardStt(req, res)
+    if (url.pathname.startsWith('/voice-samples/')) {
+      // Spoken-command test clips for the in-simulator voice verification
+      // page (voice-test.html). Dev-only: the page is not in the build.
+      const name = path.basename(url.pathname)
+      if (!/^[\w.-]+\.pcm$/.test(name)) return json(res, 400, { error: 'bad sample name' })
+      try {
+        const data = await readFile(path.join(SAMPLES_DIR, name))
+        res.writeHead(200, {
+          'content-type': 'application/octet-stream',
+          'access-control-allow-origin': '*',
+          'cache-control': 'no-store',
+        })
+        return res.end(data)
+      } catch {
+        return json(res, 404, { error: 'no such sample' })
+      }
+    }
+    if (url.pathname === '/api/perps') {
+      return json(res, 200, await cached('perps', 30_000, fetchPerps))
+    }
     if (url.pathname === '/api/markets') {
       const limit = Math.min(15, Math.max(1, Number(url.searchParams.get('limit')) || 10))
       return json(res, 200, { markets: await cached(`markets:${limit}`, 20_000, () => fetchMarkets(limit)) })
@@ -282,4 +412,5 @@ server.listen(PORT, () => {
   void cached('markets:15', 20_000, () => fetchMarkets(15)).catch(() => {})
   void cached(`digest:${DEFAULT_CHANNELS.join(',')}:10`, 45_000, () => fetchDigest(DEFAULT_CHANNELS, 10)).catch(() => {})
   void cached('spot', 30_000, fetchSpot).catch(() => {})
+  void cached('perps', 30_000, fetchPerps).catch(() => {})
 })
